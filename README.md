@@ -20,13 +20,32 @@ pip install -r requirements.txt
 
 2) **Prepare data**
 - Place Benchmark1 and Benchmark2 raw files under your chosen root (FASTA/sequences and labels as expected by `data_processing/main_preprocess.py`).
-- Update paths in `configs/training_config.yaml` (e.g., `paths.data_root`, embedding paths if you keep them outside the repo).
+- Obtain PDB files for the sequences (e.g., from AlphaFold database or PDB repository) to provide structural information.
+- Place PDB files in the data directory, e.g., under `data/benchmark1/pdb/` and `data/benchmark2/pdb/`, ensuring file names match sequence IDs (e.g., `sequence_id.pdb`).
+- Update paths in `configs/training_config.yaml` (e.g., `paths.data_root`, embedding paths if you keep them outside the repo, and PDB paths if needed).
 
 3) **Preprocess** (build graphs, features, embeddings references):
+
+For Benchmark1:
 ```bash
-python data_processing/main_preprocess.py \
-  --config configs/training_config.yaml \
-  --output_dir ./data_processed
+python -m data_processing.main_preprocess \
+ --output_dir ./benchmark1_graph \
+ --data_root ./data/benchmark1/ \
+ --benchmark_mode benchmark1 \
+ --cutoff 10.0 \
+ --esm_model_name "facebook/esm2_t36_3B_UR50D" \
+ --num_workers 32
+```
+
+For Benchmark2:
+```bash
+python -m data_processing.main_preprocess \
+ --output_dir ./benchmark2_graph \
+ --data_root ./data/benchmark2/ \
+ --benchmark_mode benchmark2 \
+ --cutoff 10.0 \
+ --esm_model_name "facebook/esm2_t36_3B_UR50D" \
+ --num_workers 32
 ```
 
 4) **Train** (two-stage pipeline):
