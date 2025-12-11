@@ -20,7 +20,8 @@ pip install -r requirements.txt
 
 2) **Prepare data**
 - Place Benchmark1 and Benchmark2 raw files under your chosen root (FASTA/sequences and labels as expected by `data_processing/main_preprocess.py`).
-- Obtain PDB files for the sequences (e.g., from AlphaFold database or PDB repository) to provide structural information.
+- Obtain PDB files with per-residue confidence scores (e.g., AlphaFold/ESMFold structures with pLDDT). 
+  Experimental PDBs without pLDDT can still be used, but the uncertainty-aware parts of SUCF-AMP will not be fully active.
 - Place PDB files in the data directory, e.g., under `data/benchmark1/pdb/` and `data/benchmark2/pdb/`, ensuring file names match sequence IDs (e.g., `sequence_id.pdb`).
 - Update paths in `configs/training_config.yaml` (e.g., `paths.data_root`, embedding paths if you keep them outside the repo, and PDB paths if needed).
 
