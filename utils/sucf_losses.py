@@ -104,6 +104,26 @@ class SupervisedContrastiveLoss(nn.Module):
         return loss
 
 
+class FocalLoss(nn.Module):
+    """
+    Focal Loss for addressing class imbalance and hard example mining.
+    FL(p_t) = -alpha * (1 - p_t)^gamma * log(p_t)
+    """
+    def __init__(self, alpha=0.25, gamma=2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, inputs, targets):
+        bce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction='none')
+        probs = torch.sigmoid(inputs)
+        pt = torch.where(targets == 1, probs, 1 - probs)
+        focal_weight = (1 - pt) ** self.gamma
+        alpha_t = torch.where(targets == 1, self.alpha, 1 - self.alpha)
+        loss = alpha_t * focal_weight * bce_loss
+        return loss.mean()
+
+
 class SUCFTotalLoss(nn.Module):
     """
     Total loss function for the SUCF model, supporting dynamic weighting for two-stage training.
@@ -112,9 +132,24 @@ class SUCFTotalLoss(nn.Module):
         super().__init__()
         self.config = config
         loss_config = config.get('training', {}).get('loss_config', {})
-        
+
         # Initialize individual loss functions
-        self.activity_loss = nn.BCEWithLogitsLoss()
+        self.use_focal = loss_config.get('use_focal_loss', False)
+        self.use_class_weight = loss_config.get('use_class_weight', False)
+        self.pos_weight = loss_config.get('pos_weight', 1.0)
+        self.label_smoothing = loss_config.get('label_smoothing', 0.0)
+
+        if self.use_focal:
+            self.activity_loss = FocalLoss(
+                alpha=loss_config.get('focal_alpha', 0.25),
+                gamma=loss_config.get('focal_gamma', 2.0)
+            )
+            logger.info(f"Using Focal Loss (alpha={loss_config.get('focal_alpha', 0.25)}, gamma={loss_config.get('focal_gamma', 2.0)})")
+        elif self.use_class_weight:
+            self.activity_loss = None  # Will handle in forward with proper device
+            logger.info(f"Using Weighted BCE (pos_weight={self.pos_weight})")
+        else:
+            self.activity_loss = nn.BCEWithLogitsLoss()
         self.alignment_contrastive_loss = AlignmentContrastiveLoss(
             temperature=loss_config.get('alignment_contrastive_temperature', 0.1)
         )
@@ -147,8 +182,19 @@ class SUCFTotalLoss(nn.Module):
         if 'activity' in active_losses:
             activity_pred = model_output['activity_pred'].squeeze()
             target_labels = targets.y.float()
-            
-            activity_loss_val = self.activity_loss(activity_pred, target_labels)
+
+            # Apply label smoothing if configured
+            if self.label_smoothing > 0:
+                target_labels = target_labels * (1 - self.label_smoothing) + 0.5 * self.label_smoothing
+
+            if self.use_class_weight:
+                # Weighted BCE with proper device placement
+                weight = torch.tensor([self.pos_weight], device=device)
+                activity_loss_val = F.binary_cross_entropy_with_logits(
+                    activity_pred, target_labels, pos_weight=weight
+                )
+            else:
+                activity_loss_val = self.activity_loss(activity_pred, target_labels)
             loss_dict['activity'] = activity_loss_val.item()
             total_loss += loss_weights.get('activity', 0.0) * activity_loss_val
         

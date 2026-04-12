@@ -20,7 +20,7 @@ data:
       dim: 21
 
 # Random seed for reproducibility
-random_seed: 42
+random_seed: 47
 
 # Model architecture configuration
 model:
@@ -100,7 +100,6 @@ training:
       name: SUCF Model Fine-tuning
       description: "Focuses on optimizing the fusion module and prediction performance."
       epochs: 35
-      warmup_epochs: 3
       active_losses:
         - activity
         - supervised_contrastive

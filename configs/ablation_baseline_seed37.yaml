@@ -20,7 +20,7 @@ data:
       dim: 21
 
 # Random seed for reproducibility
-random_seed: 42
+random_seed: 37
 
 # Model architecture configuration
 model:
