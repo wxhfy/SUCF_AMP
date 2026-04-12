@@ -1,0 +1,42 @@
+{
+  "round": 15,
+  "threadId": "",
+  "status": "complete",
+  "last_score": 9,
+  "last_verdict": "improved",
+  "pending_experiments": [],
+  "baseline_metrics": {
+    "accuracy": 0.9389,
+    "precision": 0.9630,
+    "recall": 0.9129,
+    "f1": 0.9373,
+    "mcc": 0.8790,
+    "auc": 0.9835,
+    "aupr": 0.9812
+  },
+  "best_config": {
+    "label_smoothing": 0.05,
+    "warmup_epochs": 3,
+    "patience": 15
+  },
+  "best_result": {
+    "accuracy": 0.9431,
+    "precision": 0.9688,
+    "recall": 0.9157,
+    "f1": 0.9415,
+    "mcc": 0.8876,
+    "auc": 0.9772,
+    "aupr": 0.9796,
+    "tn": 693,
+    "fp": 19,
+    "fn": 60,
+    "tp": 652
+  },
+  "improvement_vs_baseline": {
+    "mcc": "+0.0086",
+    "accuracy": "+0.0042",
+    "fp_reduction": "25 → 19",
+    "fn_reduction": "62 → 60"
+  },
+  "timestamp": "2026-04-12T10:57:32"
+}
