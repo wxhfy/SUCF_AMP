@@ -213,6 +213,35 @@ class MambaLayer(nn.Module):
             return forward_out + backward_out
 
 
+class TransformerLayer(nn.Module):
+    """
+    A Transformer encoder layer for sequence modeling as alternative to Mamba.
+    """
+    def __init__(self, d_model, num_heads=8, dim_feedforward=2048, dropout=0.1):
+        super().__init__()
+        self.self_attn = nn.MultiheadAttention(d_model, num_heads, dropout=dropout, batch_first=True)
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, batch=None):
+        if batch is not None:
+            dense_x, mask = to_dense_batch(x, batch)
+            attn_out, _ = self.self_attn(dense_x, dense_x, dense_x, key_padding_mask=~mask)
+            out = self.norm1(dense_x + self.dropout(attn_out))
+            ffn_out = self.linear2(self.dropout(torch.relu(self.linear1(out))))
+            out = self.norm2(out + self.dropout(ffn_out))
+            return out[mask]
+        else:
+            attn_out, _ = self.self_attn(x.unsqueeze(1), x.unsqueeze(1), x.unsqueeze(1))
+            out = self.norm1(x + self.dropout(attn_out.squeeze(1)))
+            ffn_out = self.linear2(self.dropout(torch.relu(self.linear1(out))))
+            out = self.norm2(out + self.dropout(ffn_out))
+            return out
+
+
 class PLDDTGating(nn.Module):
     """Confidence gate that blends structure and sequence streams using pLDDT."""
 

@@ -202,7 +202,7 @@ class SUCFTotalLoss(nn.Module):
         if 'alignment_contrastive' in active_losses:
             seq_global = model_output.get('seq_global')
             struct_global = model_output.get('struct_global')
-            
+
             if seq_global is not None and struct_global is not None:
                 alignment_loss_val = self.alignment_contrastive_loss(seq_global, struct_global)
                 loss_dict['alignment_contrastive'] = alignment_loss_val.item()

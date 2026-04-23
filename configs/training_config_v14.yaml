@@ -1,0 +1,118 @@
+# Paths for data, logs, and model checkpoints
+paths:
+  data_root: /home/20T-1/fyh0106/compare/merged_amp_decoy/
+  checkpoint_dir: ./outputs/checkpoints
+  log_dir: ./outputs/logs
+
+data:
+  extra_embeddings:
+    esm_amp:
+      attr: amp_embedding
+      path: /home/20T-1/fyh0106/compare/merged_amp_decoy/embeddings/amp_embedding
+      type: file
+    protbert:
+      attr: protbert_embedding
+      path: /home/20T-1/fyh0106/compare/merged_amp_decoy/embeddings/protbert_embedding
+      type: file
+    one_hot:
+      attr: one_hot_embedding
+      type: one_hot_from_x
+      dim: 21
+
+# Random seed for reproducibility
+random_seed: 37  # Best seed for AMP prediction
+
+# Model architecture configuration
+model:
+  architecture:
+    hidden_dim: 512
+    dropout: 0.1
+    gvp_layers: 2
+    rgat_layers: 3
+    rgat_heads: 16  #  512 % 16 == 0
+    cross_attention_heads: 16
+    mamba_layers: 2
+    mamba_d_state: 8
+    mamba_d_conv: 4
+    mamba_expand: 2
+    laplacian_k: 16
+    node_scalar_dim: 22
+    node_vector_dim: 1
+    edge_scalar_dim: 10
+
+  esm:
+    # Name or local path of the pre-trained ESM model
+    base_model_name_or_path: facebook/esm2_t36_3B_UR50D
+
+  sequence_inputs:
+    esm:
+      attr: amp_embedding
+      in_dim: 2560
+    protbert:
+      attr: protbert_embedding
+      in_dim: 1024
+    one_hot:
+      attr: one_hot_embedding
+      in_dim: 21
+
+# Training process configuration
+training:
+  device: cuda:0
+  batch_size: 64
+  num_workers: 16
+  pin_memory: true
+  
+  loss_config:
+    alignment_contrastive_temperature: 0.1
+    supervised_contrastive_temperature: 0.07
+    use_focal_loss: false
+    label_smoothing: 0.05
+  
+  optimizer_params:
+    type: AdamW
+    lr: 3.1e-5  # Best LR from V14 tuning
+    weight_decay: 0.01
+
+  scheduler_params:
+    scheduler_type: cosine_annealing
+    min_lr_factor: 0.01
+
+  # Configuration for the two training stages
+  sub_stages:
+    '1.0':
+      name: Feature Alignment Pre-training
+      description: "Forces alignment between sequence and structure encoders."
+      epochs: 15
+      active_losses:
+        - alignment_contrastive
+      loss_weights:
+        activity: 0.0
+        alignment_contrastive: 1.0
+        supervised_contrastive: 0.0
+      optimizer:
+        lr: 2.27e-05
+      early_stopping:
+        enable: true
+        monitor: val_loss
+        mode: min
+        patience: 5
+    
+    '2.0':
+      name: SUCF Model Fine-tuning
+      description: "Focuses on optimizing the fusion module and prediction performance."
+      epochs: 35
+      warmup_epochs: 3
+      active_losses:
+        - activity
+        - supervised_contrastive
+      loss_weights:
+        activity: 1.0
+        alignment_contrastive: 0.0
+        supervised_contrastive: 0.5
+      optimizer:
+        lr: 1.0e-05
+      early_stopping:
+        enable: true
+        monitor: val_mcc
+        mode: max
+        patience: 15
