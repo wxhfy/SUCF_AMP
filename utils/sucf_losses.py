@@ -124,6 +124,73 @@ class FocalLoss(nn.Module):
         return loss.mean()
 
 
+class GateMonotonicityLoss(nn.Module):
+    """Encourages the pLDDT gate to be monotonically non-decreasing across pLDDT bins.
+
+    The gate is expected to be near 0 for very-low pLDDT (use sequence) and
+    near 1 for high pLDDT (use structure). A simple ReLU-margin loss penalises
+    cases where the bin-wise mean gate fails to increase by at least `margin`
+    between consecutive bins. This is a much safer regulariser than maximising
+    raw variance — it directly aligns the gate with the desired pLDDT-conditioned
+    behaviour and is robust to per-channel modulation.
+    """
+
+    DEFAULT_BINS = ((0.0, 50.0), (50.0, 70.0), (70.0, 90.0), (90.0, 101.0))
+
+    def __init__(self, margin: float = 0.05, bins=None):
+        super().__init__()
+        self.margin = float(margin)
+        self.bins = list(bins) if bins is not None else list(self.DEFAULT_BINS)
+
+    def forward(self, gate_per_residue, plddt):
+        """
+        Args:
+            gate_per_residue (torch.Tensor): Scalar gate per residue [N, 1] or [N].
+            plddt (torch.Tensor): Raw pLDDT per residue [N] or [N, 1].
+
+        Returns:
+            torch.Tensor: Scalar monotonicity loss.
+        """
+        if gate_per_residue is None or plddt is None:
+            return torch.tensor(0.0, device=plddt.device if plddt is not None else 'cpu')
+
+        gate_flat = gate_per_residue.view(-1)
+        plddt_flat = plddt.view(-1)
+
+        bin_means = []
+        for lo, hi in self.bins:
+            mask = (plddt_flat >= lo) & (plddt_flat < hi)
+            if mask.any():
+                bin_means.append(gate_flat[mask].mean())
+
+        if len(bin_means) < 2:
+            return torch.tensor(0.0, device=gate_flat.device)
+
+        means = torch.stack(bin_means)
+        diffs = means[1:] - means[:-1]
+        # Penalise any pair that does not rise by at least `margin`.
+        return F.relu(self.margin - diffs).mean()
+
+
+class ReliabilityRegularizationLoss(nn.Module):
+    """Encourages c_resid (MLP modulation) to stay close to 1.0 so the reliability
+    score closely follows the monotone q_prior. This prevents the MLP from learning
+    spurious patterns that break pLDDT monotonicity and introduce training variance.
+    """
+
+    def __init__(self, margin: float = 0.3):
+        super().__init__()
+        self.margin = float(margin)
+
+    def forward(self, c_resid_r, c_resid_a):
+        if c_resid_r is None or c_resid_a is None:
+            return torch.tensor(0.0)
+        # Penalise deviation from 1.0, but allow up to `margin` free.
+        loss_r = F.relu((1.0 - c_resid_r).abs() - self.margin).mean()
+        loss_a = F.relu((1.0 - c_resid_a).abs() - self.margin).mean()
+        return loss_r + loss_a
+
+
 class SUCFTotalLoss(nn.Module):
     """
     Total loss function for the SUCF model, supporting dynamic weighting for two-stage training.
@@ -155,6 +222,12 @@ class SUCFTotalLoss(nn.Module):
         )
         self.supervised_contrastive_loss = SupervisedContrastiveLoss(
             temperature=loss_config.get('supervised_contrastive_temperature', 0.07)
+        )
+        self.gate_monotonicity_loss = GateMonotonicityLoss(
+            margin=loss_config.get('gate_monotonicity_margin', 0.05)
+        )
+        self.reliability_reg_loss = ReliabilityRegularizationLoss(
+            margin=loss_config.get('reliability_reg_margin', 0.3)
         )
         logger.info("SUCF total loss function initialized.")
     
@@ -204,6 +277,10 @@ class SUCFTotalLoss(nn.Module):
             struct_global = model_output.get('struct_global')
 
             if seq_global is not None and struct_global is not None:
+                # Unified single-anchor InfoNCE: aligns calibrated sequence to
+                # the structural stream that actually feeds final fusion.  Same
+                # objective shape across all ablations -> fair comparison
+                # (Codex Round 5 fix).
                 alignment_loss_val = self.alignment_contrastive_loss(seq_global, struct_global)
                 loss_dict['alignment_contrastive'] = alignment_loss_val.item()
                 total_loss += loss_weights.get('alignment_contrastive', 0.0) * alignment_loss_val
@@ -219,7 +296,26 @@ class SUCFTotalLoss(nn.Module):
                 total_loss += loss_weights.get('supervised_contrastive', 0.0) * sup_contrastive_loss_val
             else:
                 logger.warning("Supervised contrastive loss requires 'combined_global' features.")
-        
+
+        # 4. Gate Monotonicity Regulariser
+        if 'gate_monotonicity' in active_losses:
+            gate_per_residue = model_output.get('gate_per_residue')
+            plddt_per_residue = model_output.get('plddt_per_residue')
+            if gate_per_residue is not None and plddt_per_residue is not None:
+                mono_loss_val = self.gate_monotonicity_loss(gate_per_residue, plddt_per_residue)
+                loss_dict['gate_monotonicity'] = mono_loss_val.item() if mono_loss_val.requires_grad or mono_loss_val.numel() > 0 else float(mono_loss_val)
+                total_loss += loss_weights.get('gate_monotonicity', 0.0) * mono_loss_val
+
+        # 5. Reliability Regularisation (Round 9): keep c_resid MLPs close to identity.
+        if 'reliability_reg' in active_losses:
+            c_resid_r = model_output.get('c_resid_r')
+            c_resid_a = model_output.get('c_resid_a')
+            if c_resid_r is not None and c_resid_a is not None:
+                reg_loss_val = self.reliability_reg_loss(c_resid_r, c_resid_a)
+                loss_dict['reliability_reg'] = (reg_loss_val.item() if hasattr(reg_loss_val, 'item')
+                                                else float(reg_loss_val))
+                total_loss += loss_weights.get('reliability_reg', 0.0) * reg_loss_val
+
         loss_dict['total_loss'] = total_loss
         return loss_dict
 
