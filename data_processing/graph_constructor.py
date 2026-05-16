@@ -31,13 +31,13 @@ class GraphConstructor:
             cutoff_distance=cutoff_distance,
         )
 
-    def _load_esm_embedding(self, embedding_path: str) -> Optional[np.ndarray]:
-        """Loads a pre-computed ESM embedding from a .npy file."""
+    def _load_embedding(self, embedding_path: str) -> Optional[np.ndarray]:
+        """Loads a pre-computed embedding from a .npy file."""
         if embedding_path and os.path.exists(embedding_path):
             try:
                 return np.load(embedding_path)
             except Exception as e:
-                logger.error(f"Failed to load ESM embedding file {embedding_path}: {e}")
+                logger.error(f"Failed to load embedding file {embedding_path}: {e}")
                 return None
         return None
 
@@ -45,12 +45,17 @@ class GraphConstructor:
                               pdb_gz_path: str,
                               sequence_id: str,
                               embedding_dir: Optional[str],
-                              embedding_stage: str,
+                              embedding_stages: list = None,
                               activity_label: Optional[int] = None,
                               ) -> Optional[Data]:
         """
-        Constructs a PyG Data object from a PDB file and pre-computed ESM embeddings.
+        Constructs a PyG Data object from a PDB file and pre-computed embeddings.
+
+        embedding_stages: list of embedding subdirectory names to load
+                         (e.g. ['amp_embedding', 'protbert_embedding'])
         """
+        if embedding_stages is None:
+            embedding_stages = ['amp_embedding']
         try:
             # 1. Parse the PDB file to extract structural information.
             parsed_pdb = self.pdb_processor.parse_pdb_gz(pdb_gz_path)
@@ -74,14 +79,17 @@ class GraphConstructor:
             node_vector_feat = self.feature_calculator.normalize_coordinates(ca_coords)
             edge_index, edge_scalar_attr, edge_vector_attr = self.feature_calculator.build_graph_edges(ca_coords)
 
-            # 3. Load the pre-computed ESM embedding.
-            loaded_embedding = None
+            # 3. Load pre-computed embeddings for each stage.
+            loaded_embeddings = {}
             if embedding_dir:
-                embedding_file_path = os.path.join(embedding_dir, embedding_stage, f"{sequence_id}.npy")
-                loaded_embedding = self._load_esm_embedding(embedding_file_path)
-                if loaded_embedding is not None and loaded_embedding.shape[0] != len(original_sequence):
-                    logger.error(f"Embedding length mismatch for {sequence_id}. Seq: {len(original_sequence)}, Emb: {loaded_embedding.shape[0]}. Discarding embedding.")
-                    loaded_embedding = None
+                for stage in embedding_stages:
+                    embedding_file_path = os.path.join(embedding_dir, stage, f"{sequence_id}.npy")
+                    emb = self._load_embedding(embedding_file_path)
+                    if emb is not None:
+                        if emb.shape[0] != len(original_sequence):
+                            logger.error(f"Embedding length mismatch for {sequence_id} ({stage}). Seq: {len(original_sequence)}, Emb: {emb.shape[0]}. Discarding.")
+                        else:
+                            loaded_embeddings[stage] = emb
 
             # 4. Assemble the PyG Data object.
             data = Data(
@@ -98,9 +106,9 @@ class GraphConstructor:
                 num_nodes=len(original_sequence)
             )
 
-            # Store the ESM embedding as a dynamic attribute on the Data object.
-            if loaded_embedding is not None:
-                setattr(data, embedding_stage, torch.from_numpy(loaded_embedding).float())
+            # Store embeddings as dynamic attributes on the Data object.
+            for stage, emb in loaded_embeddings.items():
+                setattr(data, stage, torch.from_numpy(emb).float())
 
             return data
 
@@ -113,12 +121,14 @@ class GraphConstructor:
                                original_sequence: str,
                                ca_coords: np.ndarray,
                                plddt_scores: np.ndarray,
-                               esm_embedding: Optional[np.ndarray] = None,
-                               embedding_stage: str = "amp_embedding",
+                               embeddings: Optional[Dict[str, np.ndarray]] = None,
                                activity_label: Optional[int] = None,
                                ) -> Optional[Data]:
         """
         Constructs a PyG Data object from in-memory data arrays.
+
+        embeddings: dict mapping embedding name -> numpy array
+                   (e.g. {'amp_embedding': arr1, 'protbert_embedding': arr2})
         """
         try:
             if ca_coords.shape[0] != len(original_sequence):
@@ -143,11 +153,12 @@ class GraphConstructor:
                 num_nodes=len(original_sequence)
             )
 
-            if esm_embedding is not None:
-                if esm_embedding.shape[0] != len(original_sequence):
-                    logger.error(f"Embedding length mismatch for {sequence_id}. Discarding embedding.")
-                else:
-                    setattr(data, embedding_stage, torch.from_numpy(esm_embedding).float())
+            if embeddings:
+                for stage, emb in embeddings.items():
+                    if emb.shape[0] != len(original_sequence):
+                        logger.error(f"Embedding length mismatch for {sequence_id} ({stage}). Discarding.")
+                    else:
+                        setattr(data, stage, torch.from_numpy(emb).float())
 
             return data
         except Exception as e:

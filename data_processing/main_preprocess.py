@@ -20,7 +20,8 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 
 from .pdb_parser import PDBProcessor
 from .graph_constructor import GraphConstructor
-from .esm_embedder import embed_sequences_and_save
+from .esm_embedder import embed_sequences_and_save as embed_esm_and_save
+from .protbert_embedder import embed_sequences_and_save as embed_protbert_and_save
 from .feature_calculator import FeatureCalculator
 from utils.config_utils import load_config
 
@@ -38,27 +39,22 @@ def _mp_graph_constructor_task(args_bundle: Tuple) -> Optional[Data]:
     """
     A wrapper function for parallel graph construction in a worker process.
     """
-    pdb_file_path, protein_id, base_embedding_dir, embedding_stage, activity_label, cutoff_distance = args_bundle
+    pdb_file_path, protein_id, base_embedding_dir, embedding_stages, activity_label, cutoff_distance = args_bundle
 
     try:
-        # Create a local GraphConstructor instance to ensure process safety
         from .graph_constructor import GraphConstructor
-        graph_constructor = GraphConstructor(
-            cutoff_distance=cutoff_distance,
-        )
+        graph_constructor = GraphConstructor(cutoff_distance=cutoff_distance)
         graph_data = graph_constructor.create_graph_from_pdb(
             pdb_gz_path=pdb_file_path,
             sequence_id=protein_id,
             embedding_dir=base_embedding_dir,
-            embedding_stage=embedding_stage,
+            embedding_stages=embedding_stages,
             activity_label=activity_label,
         )
         return graph_data
     except Exception:
-        # Return None on failure without logging from the child process
         return None
     finally:
-        # Explicitly clean up memory in the worker process
         import gc
         gc.collect()
 
@@ -69,7 +65,10 @@ class AMPPreprocessor:
     """
     def __init__(self, output_dir: str, cutoff_distance: float = 10.0, max_seq_sep: int = 32,
                  esm_model_name: str = "esm2_t36_3B_UR50D",
-                 esm_model_base_path: Optional[str] = None, max_seq_len: int = 200):
+                 esm_model_base_path: Optional[str] = None,
+                 protbert_model_name: str = "Rostlab/prot_bert",
+                 protbert_model_base_path: Optional[str] = None,
+                 max_seq_len: int = 200):
         """
         Initializes the preprocessor.
 
@@ -79,6 +78,8 @@ class AMPPreprocessor:
             max_seq_sep (int): Maximum sequence separation for graph edges.
             esm_model_name (str): Name of the ESM model for embeddings.
             esm_model_base_path (Optional[str]): Local path to ESM model files.
+            protbert_model_name (str): Name of the ProtBERT model.
+            protbert_model_base_path (Optional[str]): Local path to ProtBERT model files.
             max_seq_len (int): Maximum allowed sequence length.
         """
         self.output_dir_base = output_dir
@@ -88,6 +89,8 @@ class AMPPreprocessor:
         self.pdb_processor = PDBProcessor()
         self.esm_model_name = esm_model_name
         self.esm_model_base_path = esm_model_base_path
+        self.protbert_model_name = protbert_model_name
+        self.protbert_model_base_path = protbert_model_base_path
         self.max_seq_len = max_seq_len
 
     def preprocess_dataset(self,
@@ -96,6 +99,7 @@ class AMPPreprocessor:
                            pdb_file_type: str = "pdb.gz",
                            num_workers: int = 32,
                            process_embeddings: bool = True,
+                           skip_protbert: bool = False,
                            force_regenerate_embeddings: bool = False,
                            force_regenerate_graphs: bool = False,
                            batch_size: int = 500):
@@ -164,25 +168,46 @@ class AMPPreprocessor:
             self._create_splits(output_dir, [])
             return
 
-        # --- 2. ESM Embedding ---
+        # --- 2. Sequence Embeddings (ESM-2 + ProtBERT) ---
+        embedding_stages = ["amp_embedding"]
+        if not skip_protbert:
+            embedding_stages.append("protbert_embedding")
+
         if process_embeddings:
+            sequences_for_embedding = [{"id": s["id"], "sequence": s["sequence"]} for s in sequence_data_list]
+
+            # ESM-2 embeddings
             esm_embedding_subdir = "amp_embedding"
             stage_specific_esm_output_dir = embeddings_output_dir / esm_embedding_subdir
             if force_regenerate_embeddings and stage_specific_esm_output_dir.exists():
                 logger.info(f"Forcing ESM embedding regeneration, deleting: {stage_specific_esm_output_dir}")
                 import shutil
                 shutil.rmtree(stage_specific_esm_output_dir)
-
-            sequences_for_esm = [{"id": s["id"], "sequence": s["sequence"]} for s in sequence_data_list]
-            embed_sequences_and_save(
-                sequence_data=sequences_for_esm,
+            embed_esm_and_save(
+                sequence_data=sequences_for_embedding,
                 output_dir=str(stage_specific_esm_output_dir),
                 model_name=self.esm_model_name,
                 local_model_path_root=self.esm_model_base_path,
             )
             logger.info(f"ESM embeddings saved in {stage_specific_esm_output_dir}")
+
+            # ProtBERT embeddings
+            if not skip_protbert:
+                protbert_embedding_subdir = "protbert_embedding"
+                stage_specific_protbert_output_dir = embeddings_output_dir / protbert_embedding_subdir
+                if force_regenerate_embeddings and stage_specific_protbert_output_dir.exists():
+                    logger.info(f"Forcing ProtBERT embedding regeneration, deleting: {stage_specific_protbert_output_dir}")
+                    import shutil
+                    shutil.rmtree(stage_specific_protbert_output_dir)
+                embed_protbert_and_save(
+                    sequence_data=sequences_for_embedding,
+                    output_dir=str(stage_specific_protbert_output_dir),
+                    model_name=self.protbert_model_name,
+                    local_model_path_root=self.protbert_model_base_path,
+                )
+                logger.info(f"ProtBERT embeddings saved in {stage_specific_protbert_output_dir}")
         else:
-            logger.info("Skipping ESM embedding computation.")
+            logger.info("Skipping embedding computation.")
 
         # --- 3. Graph Construction ---
         processed_ids = set()
@@ -191,7 +216,7 @@ class AMPPreprocessor:
             logger.info(f"Found {len(processed_ids)} existing graph files, skipping them.")
         
         tasks_for_mp = [
-            (s["original_path"], s["id"], str(embeddings_output_dir), "amp_embedding", s["activity_label"],
+            (s["original_path"], s["id"], str(embeddings_output_dir), embedding_stages, s["activity_label"],
              self.graph_constructor.feature_calculator.cutoff_distance)
             for s in sequence_data_list if s["id"] not in processed_ids
         ]
@@ -297,10 +322,13 @@ if __name__ == "__main__":
     parser.add_argument("--cutoff", type=float, default=10.0, help="Distance cutoff for graph construction (Å).")
     parser.add_argument("--esm_model_name", type=str, default="facebook/esm2_t36_3B_UR50D", help="ESM model name.")
     parser.add_argument("--esm_model_base_path", type=str, help="Local root directory for the ESM model.")
+    parser.add_argument("--protbert_model_name", type=str, default="Rostlab/prot_bert", help="ProtBERT model name.")
+    parser.add_argument("--protbert_model_base_path", type=str, help="Local root directory for the ProtBERT model.")
+    parser.add_argument("--skip_protbert", action="store_true", help="Skip ProtBERT embedding computation.")
     parser.add_argument("--max_seq_len", type=int, default=math.inf, help="Maximum sequence length to process.")
-    parser.add_argument("--force_regenerate_embeddings", action="store_true", help="Force re-computation of all ESM embeddings.")
+    parser.add_argument("--force_regenerate_embeddings", action="store_true", help="Force re-computation of all embeddings.")
     parser.add_argument("--force_regenerate_graphs", action="store_true", help="Force re-construction of all graph files.")
-    parser.add_argument("--skip_embeddings", action="store_true", help="Skip the ESM embedding computation step.")
+    parser.add_argument("--skip_embeddings", action="store_true", help="Skip all embedding computation steps.")
     parser.add_argument("--num_workers", type=int, default=mp.cpu_count(), help="Number of CPU worker processes for graph construction.")
     parser.add_argument("--batch_size", type=int, default=500, help="Batch size for processing graphs to manage memory.")
 
@@ -329,6 +357,8 @@ if __name__ == "__main__":
         cutoff_distance=args.cutoff,
         esm_model_name=args.esm_model_name,
         esm_model_base_path=args.esm_model_base_path,
+        protbert_model_name=args.protbert_model_name,
+        protbert_model_base_path=args.protbert_model_base_path,
         max_seq_len=args.max_seq_len
     )
 
@@ -337,6 +367,7 @@ if __name__ == "__main__":
         benchmark_mode=benchmark_mode,
         num_workers=args.num_workers,
         process_embeddings=(not args.skip_embeddings),
+        skip_protbert=args.skip_protbert,
         force_regenerate_embeddings=args.force_regenerate_embeddings,
         force_regenerate_graphs=args.force_regenerate_graphs,
         batch_size=args.batch_size
